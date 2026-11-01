@@ -35,7 +35,7 @@ const HELP = `huashu-motion ${VERSION} — motion graphics made by your coding a
   om qa [dir|video] [--loop]     check a render: single-frame pops, dead time, hard cuts, motion curve, loop seam
   om render [dir] --transparent  overlay for 剪映/Premiere: ProRes 4444 with alpha (or --format webm), no sound
   om fork <dir> <newdir> --size 1080x1920   copy into a new frame size; the re-layout lands in the inbox
-  om voice <dir> --text <file|"文本"> | --audio <file> [--voice say:Tingting|zf_xiaobei] [--fit]   narration, word cues, .srt
+  om voice <dir> --text <file|"文本"> | --audio <file> [--voice say:Tingting|zf_xiaobei|breeze:<name>] [--instruct "语气"] [--fit]   narration, word cues, .srt
   om sound [dir] [--list] [--off]   music + sound effects from the scenes, OM.sfx hits and an om-score (om render refreshes it)
   om still <page.html|dir> [--at 0,2.5] [--out file]   a PNG of any page (direction key frames, treatment stills)
   om swatch [directions.md] [--out file]   the Palette: lines of the direction cards as one PNG, with contrast and house-look checks

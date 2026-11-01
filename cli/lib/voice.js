@@ -42,6 +42,32 @@ export function splitSentences(text) {
   return out;
 }
 
+// BreezeTTS vocal events: spoken by the breeze engine, never part of captions or cues.
+const EVENTS = /\[(?:笑|咳嗽|清嗓子|叹气)\]|\((?:laugh|cough|clears throat|sigh)\)/gi;
+
+// The narration script → [{ text, spoken, direction }]. `text` is what is shown and timed, `spoken`
+// keeps the vocal events for the TTS, and a line starting with `{…}` directs the delivery of its sentences.
+export function scriptSentences(script) {
+  const out = [];
+  let carry = '';
+  for (const line of String(script).split(/\r?\n/)) {
+    const m = /^\s*\{([^{}]*)\}\s*/.exec(line);
+    const direction = m ? m[1].trim() : '';
+    let spokeHere = false;
+    for (const s of splitSentences(m ? line.slice(m[0].length) : line)) {
+      const text = s.replace(EVENTS, '').replace(/\s+/g, ' ').trim();
+      if ([...text].some((c) => SPEECH_CHAR.test(c))) {
+        out.push({ text, spoken: carry ? `${carry} ${s}` : s, direction });
+        carry = '';
+        spokeHere = true;
+      } else if (spokeHere) out.at(-1).spoken += ` ${s}`;
+      else carry = carry ? `${carry} ${s}` : s;
+    }
+  }
+  if (carry && out.length) out.at(-1).spoken += ` ${carry}`;
+  return out;
+}
+
 const segmenter = new Intl.Segmenter('zh', { granularity: 'word' });
 const LATIN = /[A-Za-z0-9](?:[A-Za-z0-9.'’+_-]*[A-Za-z0-9%+])?%?/g;
 
@@ -316,15 +342,17 @@ export function charTimes(script, asr) {
   return { times: t, matched: script.length ? known / script.length : 0 };
 }
 
+const spreadChars = (chars, text, from, to) => {
+  const cs = [...String(text)].filter((c) => SPEECH_CHAR.test(c));
+  cs.forEach((ch, i) => chars.push({ ch, start: from + ((to - from) * i) / cs.length, end: from + ((to - from) * (i + 1)) / cs.length }));
+};
+
 // whisper.cpp --output-json-full → timed speech characters. With --dtw, a token's t_dtw (centiseconds)
 // is far closer to when it was said than its decoder offsets, which drift by up to a second; tokens
 // that cut a character in half (U+FFFD) fall back to spreading the segment's text over the segment.
 export function asrChars(json) {
   const chars = [];
-  const spread = (text, from, to) => {
-    const cs = [...text].filter((c) => SPEECH_CHAR.test(c));
-    cs.forEach((ch, i) => chars.push({ ch, start: from + ((to - from) * i) / cs.length, end: from + ((to - from) * (i + 1)) / cs.length }));
-  };
+  const spread = (text, from, to) => spreadChars(chars, text, from, to);
   for (const seg of json.transcription || []) {
     const toks = (seg.tokens || []).filter((t) => t.text && !/^\s*\[.*\]\s*$/.test(t.text));
     if (toks.some((t) => t.text.includes('\ufffd'))) { spread(seg.text || '', seg.offsets.from / 1000, seg.offsets.to / 1000); continue; }
@@ -334,6 +362,17 @@ export function asrChars(json) {
       const from = t.t_dtw / 100, next = toks[i + 1] ? toks[i + 1].t_dtw / 100 : Math.max(from, seg.offsets.to / 1000);
       spread(t.text, from, Math.max(from, next));
     });
+  }
+  return chars;
+}
+
+// Murmur's transcript JSON → timed speech characters: each word's span spread over its characters,
+// a segment without word timestamps over the whole segment.
+export function murmurChars(json) {
+  const chars = [];
+  for (const seg of json.segments || []) {
+    if (seg.words?.length) for (const w of seg.words) spreadChars(chars, w.text, w.start, w.end);
+    else spreadChars(chars, seg.text || '', seg.start, seg.end);
   }
   return chars;
 }
@@ -537,13 +576,72 @@ function say(textFile, outFile, voice, speed) {
   }
 }
 
+// BreezeCast (BreezeTTS 2), the local app's REST API: saved voices, a delivery instruction, vocal events.
+const BREEZE_API = join(homedir(), 'Library', 'Application Support', 'com.breezecast.studio', 'api.json');
+
+function breezeBase() {
+  if (process.env.BREEZECAST_URL) return process.env.BREEZECAST_URL.replace(/\/+$/, '');
+  try { return JSON.parse(readFileSync(BREEZE_API, 'utf8')).base_url.replace(/\/+$/, ''); } catch { return 'http://127.0.0.1:17860'; }
+}
+
+async function breezeCall(base, path, body) {
+  let r;
+  try {
+    r = await fetch(`${base}/api/v1${path}`, body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {});
+  } catch {
+    throw new OmError(`BreezeCast is not reachable at ${base} — open the BreezeCast app (or set BREEZECAST_URL)`);
+  }
+  const j = await r.json().catch(() => null);
+  if (!r.ok) throw new OmError(`BreezeCast ${path} failed: ${j?.error ? `[${j.error.code}] ${j.error.message}` : `HTTP ${r.status}`}`);
+  return j;
+}
+
+async function breezeVoice(id, log) {
+  const base = breezeBase();
+  const st = await breezeCall(base, '/status');
+  if (st.engine?.state !== 'ready') throw new OmError(`the BreezeCast engine is ${st.engine?.state || 'unknown'}${st.engine?.message ? ` (${st.engine.message})` : ''} — wait until the app shows it ready`);
+  if (!st.model?.installed?.length) throw new OmError('BreezeCast has no model installed — download one in the app (模型与引擎)');
+  const voices = await breezeCall(base, '/voices');
+  const names = voices.map((v) => v.name).join(', ') || 'none — design or clone one in the app';
+  if (!id) throw new OmError(`name a BreezeCast voice: --voice breeze:<name>. Voices: ${names}`);
+  const voice = voices.find((v) => v.id === id) || voices.find((v) => v.name === id) || voices.find((v) => v.name.toLowerCase() === id.toLowerCase());
+  if (!voice) throw new OmError(`BreezeCast has no voice "${id}". Voices: ${names}`);
+  if (!voice.has_reference) log(`note: BreezeCast voice "${voice.name}" has no reference audio, so it sounds different in every sentence — save an audition take as the voice in the app for a stable one`);
+  return { base, voice };
+}
+
+function breezeParams(opts) {
+  const params = {};
+  for (const [flag, key] of [['guidance', 'guidance_scale'], ['seed', 'seed'], ['temperature', 'temperature']]) {
+    if (opts[flag] == null) continue;
+    const n = Number(opts[flag]);
+    if (!Number.isFinite(n) || n < 0 || (key === 'seed' && !Number.isInteger(n))) throw new OmError(`--${flag} must be a ${key === 'seed' ? 'whole number' : 'number'} ≥ 0`);
+    params[key] = n;
+  }
+  return params;
+}
+
+async function breeze(session, sentence, instruct, params, outFile) {
+  const body = { text: sentence, voice_id: session.voice.id, language: HAN.test(sentence) ? 'zh' : 'en', params };
+  if (instruct) body.instruct = instruct;
+  const clip = await breezeCall(session.base, '/speech', body);
+  if (clip.path && existsSync(clip.path)) copyFileSync(clip.path, outFile);
+  else {
+    const r = await fetch(new URL(clip.url, session.base));
+    if (!r.ok) throw new OmError(`could not fetch the BreezeCast clip ${clip.id}: HTTP ${r.status}`);
+    writeFileSync(outFile, Buffer.from(await r.arrayBuffer()));
+  }
+  return clip;
+}
+
 // voice id → engine. Default: Chinese on macOS → say:Tingting (Kokoro's Chinese goes through espeak
-// without tones and is hard to understand); everything else → Kokoro.
+// without tones and is hard to understand); everything else → Kokoro. BreezeCast only when asked for.
 export function pickVoice(voice, text, platform = process.platform) {
   const zh = HAN.test(text);
   if (!voice) return platform === 'darwin' && zh ? { engine: 'say', id: 'Tingting' } : { engine: 'kokoro', id: zh ? 'zf_xiaobei' : 'af_heart' };
   if (voice === 'say') return { engine: 'say', id: zh ? 'Tingting' : 'Samantha' };
   if (voice.startsWith('say:')) return { engine: 'say', id: voice.slice(4) };
+  if (voice === 'breeze' || voice.startsWith('breeze:')) return { engine: 'breeze', id: voice.slice(7) };
   return { engine: 'kokoro', id: voice.replace(/^kokoro:/, '') };
 }
 
@@ -560,15 +658,15 @@ function readText(arg) {
 
 export async function voice(project, opts = {}, log = () => {}) {
   const text = readText(opts.text);
-  if (!text && !opts.audio) throw new OmError('usage: om voice <dir> --text <script.txt|"文本"> [--voice say:Tingting|zf_xiaobei] [--speed 1]\n       om voice <dir> --audio <recording> [--text <script>] [--asr on|off]');
+  if (!text && !opts.audio) throw new OmError('usage: om voice <dir> --text <script.txt|"文本"> [--voice say:Tingting|zf_xiaobei|breeze:<name>] [--speed 1]\n       breeze: [--instruct "语气…"] [--guidance 4] [--seed N] [--temperature 0.9]; a script line may start with {语气} and hold [笑] [叹气]…\n       om voice <dir> --audio <recording> [--text <script>] [--asr auto|murmur|whisper|on|off]');
   const { html } = readSource(project);
   const keep = cueTerms(html).map((c) => c.term);
   const tmp = mkdtempSync(join(tmpdir(), 'om-voice-'));
   const t0 = Date.now();
 
   const res = opts.audio
-    ? fromRecording(resolve(String(opts.audio)), text, keep, tmp, opts, log)
-    : fromScript(text, keep, tmp, opts, log);
+    ? await fromRecording(resolve(String(opts.audio)), text, keep, tmp, opts, log)
+    : await fromScript(text, keep, tmp, opts, log);
 
   const fresh = readSource(project);
   const meta = { source: res.source, precision: res.precision };
@@ -609,36 +707,54 @@ export async function voice(project, opts = {}, log = () => {}) {
 
 export const PRECISION = {
   tts: 'sentence edges measured from the synthesized audio; words interpolated inside the detected speech (typically within ~0.1s)',
-  asr: 'whisper places each clause, pauses give the exact edges, words interpolated inside (words are what whisper heard)',
-  'asr+script': 'script aligned to whisper, which places each clause; pauses give the exact edges, words interpolated inside',
-  silence: 'sentence edges guessed from silence gaps, words interpolated — approximate (can be off by a word or more); use --asr on for better timing',
+  asr: 'the ASR (Murmur or whisper) places each clause, pauses give the exact edges, words interpolated inside (words are what it heard)',
+  'asr+script': 'script aligned to the ASR (Murmur or whisper), which places each clause; pauses give the exact edges, words interpolated inside',
+  silence: 'sentence edges guessed from silence gaps, words interpolated — approximate (can be off by a word or more); open Murmur or use --asr whisper for better timing',
 };
 
-function fromScript(text, keep, tmp, opts, log) {
-  const sentences = splitSentences(text);
+async function fromScript(text, keep, tmp, opts, log) {
+  const sentences = scriptSentences(text);
   if (!sentences.length) throw new OmError('the script has no speakable text');
   const speed = Number(opts.speed || 1);
   if (!(speed > 0.3 && speed < 3)) throw new OmError('--speed must be between 0.3 and 3');
   const pause = opts.pause == null ? 0.25 : Number(opts.pause);
   let v = pickVoice(opts.voice, text);
   if (v.engine === 'kokoro' && HAN.test(text)) log('note: Kokoro reads Chinese through espeak without tones — whisper could not understand it in our tests. Prefer say:Tingting (macOS) or your own recording (--audio).');
+  let session = null, params = null;
+  if (v.engine === 'breeze') {
+    // BreezeTTS has no rate control: the take is time-stretched, so keep it where atempo stays clean.
+    if (speed < 0.5 || speed > 2) throw new OmError('--speed with a breeze voice must be between 0.5 and 2 (or ask for the pace in --instruct)');
+    params = breezeParams(opts);
+    session = await breezeVoice(v.id, log);
+    v = { engine: 'breeze', id: session.voice.name };
+  } else if (opts.instruct || sentences.some((s) => s.direction || s.spoken !== s.text)) {
+    log(`note: {directions}, --instruct and vocal events only apply to breeze voices; ${v.engine} reads the plain text`);
+  }
   const clips = [];
   for (let i = 0; i < sentences.length; i++) {
-    const txt = join(tmp, `s${i}.txt`);
-    writeFileSync(txt, sentences[i]);
+    const s = sentences[i];
     let raw = join(tmp, `s${i}.${v.engine === 'say' ? 'aiff' : 'wav'}`);
-    log(`tts ${i + 1}/${sentences.length} (${v.engine}:${v.id}) ${sentences[i]}`);
-    try {
-      if (v.engine === 'say') say(txt, raw, v.id, speed); else kokoro(txt, raw, v.id, speed, log);
-    } catch (e) {
-      if (!(e instanceof KokoroMissing) || opts.voice || process.platform !== 'darwin') throw e;
-      v = { engine: 'say', id: HAN.test(text) ? 'Tingting' : 'Samantha' };
-      log(`Kokoro is not set up — using macOS say:${v.id}. (${KOKORO_SETUP})`);
-      raw = join(tmp, `s${i}.aiff`);
-      say(txt, raw, v.id, speed);
+    if (v.engine === 'breeze') {
+      const instruct = s.direction || (typeof opts.instruct === 'string' ? opts.instruct : '');
+      const clip = await breeze(session, s.spoken, instruct, params, raw);
+      log(`tts ${i + 1}/${sentences.length} (breeze:${v.id}, seed ${clip.seed}${instruct ? `, ${instruct}` : ''}) ${s.spoken}`);
+    } else {
+      const txt = join(tmp, `s${i}.txt`);
+      writeFileSync(txt, s.text);
+      log(`tts ${i + 1}/${sentences.length} (${v.engine}:${v.id}) ${s.text}`);
+      try {
+        if (v.engine === 'say') say(txt, raw, v.id, speed); else kokoro(txt, raw, v.id, speed, log);
+      } catch (e) {
+        if (!(e instanceof KokoroMissing) || opts.voice || process.platform !== 'darwin') throw e;
+        v = { engine: 'say', id: HAN.test(text) ? 'Tingting' : 'Samantha' };
+        log(`Kokoro is not set up — using macOS say:${v.id}. (${KOKORO_SETUP})`);
+        raw = join(tmp, `s${i}.aiff`);
+        say(txt, raw, v.id, speed);
+      }
     }
     const clip = join(tmp, `c${i}.wav`);
-    ffmpeg(['-i', raw, '-af', TRIM, '-ar', '24000', '-ac', '1', '-c:a', 'pcm_s16le', clip], 'trimming the clip');
+    const filter = v.engine === 'breeze' && speed !== 1 ? `${TRIM},atempo=${speed}` : TRIM;
+    ffmpeg(['-i', raw, '-af', filter, '-ar', '24000', '-ac', '1', '-c:a', 'pcm_s16le', clip], 'trimming the clip');
     const duration = probe(clip);
     clips.push({ file: clip, duration, spans: speechOf(clip, duration, '-40dB', 0.12) });
   }
@@ -654,7 +770,7 @@ function fromScript(text, keep, tmp, opts, log) {
   const out = sentences.map((s, i) => {
     const spans = clips[i].spans.map(([a, b]) => [a + at, b + at]);
     at += clips[i].duration + (i < clips.length - 1 ? pauseReal : 0);
-    return { text: s, tokens: placeSentence(tokenize(s, keep), spans) };
+    return { text: s.text, tokens: placeSentence(tokenize(s.text, keep), spans) };
   });
   return { wav, duration, sentences: out, source: `tts:${v.engine}:${v.id}`, precision: 'tts' };
 }
@@ -665,44 +781,111 @@ function whisperCli() {
   return [found, '/opt/homebrew/bin/whisper-cli', '/usr/local/bin/whisper-cli', join(LEGACY, 'whisper', 'whisper.cpp', 'build', 'bin', 'whisper-cli')].find((p) => p && existsSync(p));
 }
 
-function fromRecording(file, text, keep, tmp, opts, log) {
+// Murmur, the local ASR app (Qwen3-ASR etc.): REST API with word timestamps. `required` throws when it
+// is not usable; otherwise an unusable Murmur is null and the caller falls back.
+const MURMUR_API = join(homedir(), 'Library', 'Application Support', 'app.murmur.asr', 'api.json');
+
+async function murmurService(required) {
+  let base = process.env.MURMUR_API_URL;
+  if (!base) { try { base = JSON.parse(readFileSync(MURMUR_API, 'utf8')).baseUrl; } catch { base = 'http://127.0.0.1:7895'; } }
+  base = base.replace(/\/+$/, '');
+  let health = null;
+  try { health = await (await fetch(`${base}/health`, { signal: AbortSignal.timeout(2000) })).json(); } catch { /* not running */ }
+  const why = !health ? `Murmur is not reachable at ${base} — open Murmur and turn on its API (API 接口), or set MURMUR_API_URL`
+    : health.engine?.error ? `the Murmur engine failed: ${health.engine.error}`
+    : !health.model && !health.installedModels?.length ? 'Murmur has no ASR model — download one in Murmur (模型)'
+    : health.model && !health.model.wordTimestamps ? `Murmur's model ${health.model.id} gives no word timestamps — load one that does (e.g. Qwen3-ASR)`
+    : null;
+  if (why && required) throw new OmError(why);
+  return why ? null : { base, health };
+}
+
+async function murmurTranscribe({ base, health }, file, lang, opts, log) {
+  const fields = { format: 'json', wait: false, title: `om voice · ${file.split(/[\\/]/).pop()}` };
+  const model = health.model || null;
+  if (typeof opts.model === 'string') fields.model = opts.model;
+  else if (!model) fields.model = health.installedModels[0];
+  const language = /^zh/i.test(lang) ? 'Chinese' : /^en/i.test(lang) ? 'English' : null;
+  if (model?.acceptsLanguage && language && model.languages?.includes(language)) fields.language = language;
+  log(`transcribing with Murmur ${fields.model || model.id}${fields.language ? ` (${fields.language})` : ''}…`);
+  const local = ['127.0.0.1', 'localhost', '[::1]'].includes(new URL(base).hostname);
+  let body;
+  if (local) body = JSON.stringify({ ...fields, path: file });
+  else {
+    body = new FormData();
+    for (const [k, v] of Object.entries(fields)) body.append(k, String(v));
+    body.append('file', new Blob([readFileSync(file)]), file.split(/[\\/]/).pop());
+  }
+  const call = async (path, init) => {
+    let r;
+    try { r = await fetch(`${base}${path}`, init); } catch (e) { throw new OmError(`Murmur ${path}: ${e.message}`); }
+    const j = await r.json().catch(() => null);
+    if (!r.ok) throw new OmError(`Murmur ${path} failed: ${j?.error || `HTTP ${r.status}`}`);
+    return j;
+  };
+  const job = await call('/transcribe', local ? { method: 'POST', headers: { 'content-type': 'application/json' }, body } : { method: 'POST', body });
+  for (;;) {
+    const s = await call(`/jobs/${job.id}`);
+    if (s.status === 'done') return s.result;
+    if (s.status === 'failed' || s.status === 'cancelled') throw new OmError(`Murmur transcription ${s.status}${s.error ? `: ${s.error}` : ''}`);
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
+const ASR_MODES = ['auto', 'murmur', 'whisper', 'on', 'off'];
+
+async function fromRecording(file, text, keep, tmp, opts, log) {
   if (!existsSync(file)) throw new OmError(`no such recording: ${file}`);
   const wav = join(tmp, 'voice.wav');
   ffmpeg(['-i', file, '-vn', '-ac', '1', '-ar', '48000', '-c:a', 'pcm_s16le', wav], `reading ${extname(file) || 'the recording'}`);
   const duration = probe(wav);
   const zh = text ? HAN.test(text) : opts.lang ? /^zh/i.test(opts.lang) : true;
   const lang = opts.lang || (zh ? 'zh' : 'en');
-  const model = opts.model || (lang === 'en' ? 'small.en' : 'small');
+  const model = typeof opts.model === 'string' ? opts.model : lang === 'en' ? 'small.en' : 'small';
   const modelPath = firstFile(join(CACHE, 'whisper', 'models', `ggml-${model}.bin`), join(LEGACY, 'whisper', 'models', `ggml-${model}.bin`)) || join(CACHE, 'whisper', 'models', `ggml-${model}.bin`);
   const asr = opts.asr === true ? 'on' : opts.asr === false ? 'off' : String(opts.asr || 'auto');
+  if (!ASR_MODES.includes(asr)) throw new OmError(`--asr must be one of ${ASR_MODES.join(', ')}`);
+  const sentencesOf = (script) => scriptSentences(script).map((s) => ({ text: s.text, tokens: tokenize(s.text, keep) }));
   let note = '';
 
-  const wantAsr = asr === 'on' || (asr === 'auto' && (!text || (existsSync(modelPath) && whisperCli())));
-  if (wantAsr) {
-    const wav16 = join(tmp, 'asr16.wav');
-    ffmpeg(['-i', wav, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav16], 'resampling for ASR');
-    const cli = whisperCli();
-    if (!cli) throw new OmError(`whisper is not installed — brew install whisper-cpp (macOS) or build whisper.cpp${text ? '; or --asr off for silence alignment' : ''}`);
-    if (!existsSync(modelPath)) download(`https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${model}.bin`, modelPath, log, `the whisper ${model} model (~${model.startsWith('small') ? '490' : model.startsWith('base') ? '150' : '?'} MB)`);
-    log(`transcribing with whisper ${model} (${lang})…`);
-    const args = ['-m', modelPath, '-l', lang, '-ojf', '-of', join(tmp, 'asr'), '-np', '-nfa', '--dtw', model.replace(/-/g, '.'), wav16];
-    if (lang === 'zh') args.push('--prompt', '以下是普通话的句子。');
-    must(cli, args, 'whisper');
-    const chars = asrChars(JSON.parse(readFileSync(join(tmp, 'asr.json'), 'utf8')));
-    if (!chars.length) throw new OmError('whisper heard no speech in the recording');
-    const script = text || JSON.parse(readFileSync(join(tmp, 'asr.json'), 'utf8')).transcription.map((s) => s.text).join('');
-    const sentences = splitSentences(script).map((s) => ({ text: s, tokens: tokenize(s, keep) }));
+  // auto/on: Murmur when it is running, else whisper (auto only when its model is already here or there is no script)
+  const murmur = asr === 'auto' || asr === 'on' || asr === 'murmur' ? await murmurService(asr === 'murmur') : null;
+  const useWhisper = !murmur && (asr === 'whisper' || asr === 'on' || (asr === 'auto' && (!text || (existsSync(modelPath) && whisperCli()))));
+  if (murmur || useWhisper) {
+    let chars, heard, who;
+    if (murmur) {
+      const res = await murmurTranscribe(murmur, wav, lang, opts, log);
+      chars = murmurChars(res);
+      heard = res.text || (res.segments || []).map((s) => s.text).join('');
+      who = 'Murmur';
+    } else {
+      const wav16 = join(tmp, 'asr16.wav');
+      ffmpeg(['-i', wav, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav16], 'resampling for ASR');
+      const cli = whisperCli();
+      if (!cli) throw new OmError(`no ASR available — open Murmur with its API on, or brew install whisper-cpp${text ? '; or --asr off for silence alignment' : ''}`);
+      if (!existsSync(modelPath)) download(`https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${model}.bin`, modelPath, log, `the whisper ${model} model (~${model.startsWith('small') ? '490' : model.startsWith('base') ? '150' : '?'} MB)`);
+      log(`transcribing with whisper ${model} (${lang})…`);
+      const args = ['-m', modelPath, '-l', lang, '-ojf', '-of', join(tmp, 'asr'), '-np', '-nfa', '--dtw', model.replace(/-/g, '.'), wav16];
+      if (lang === 'zh') args.push('--prompt', '以下是普通话的句子。');
+      must(cli, args, 'whisper');
+      const json = JSON.parse(readFileSync(join(tmp, 'asr.json'), 'utf8'));
+      chars = asrChars(json);
+      heard = json.transcription.map((s) => s.text).join('');
+      who = 'whisper';
+    }
+    if (!chars.length) throw new OmError(`${who} heard no speech in the recording`);
+    const sentences = sentencesOf(text || heard);
     const scriptChars = sentences.flatMap((s) => s.tokens.filter((t) => t.word).flatMap((t) => [...t.text].filter((c) => SPEECH_CHAR.test(c))));
     const { times, matched } = charTimes(scriptChars, chars);
-    if (text) note = `${Math.round(matched * 100)}% of the script's characters matched what whisper heard`;
+    if (text) note = `${Math.round(matched * 100)}% of the script's characters matched what ${who} heard`;
     if (text && matched < 0.5) note += ' — low: is this the right script for this recording?';
     const out = placeByAnchors(sentences, speechOf(wav, duration, '-35dB', 0.18), times);
-    return { wav, duration, sentences: out, source: `recording:${file.split(/[\\/]/).pop()}`, precision: text ? 'asr+script' : 'asr', note };
+    return { wav, duration, sentences: out, source: `recording:${file.split(/[\\/]/).pop()}`, precision: text ? 'asr+script' : 'asr', note: note || `words as ${who} heard them` };
   }
 
-  if (!text) throw new OmError('a recording without --text needs whisper (--asr on)');
-  if (asr === 'auto') note = `whisper ${model} not found — used silence alignment. For tighter timing: om voice … --asr on (downloads ~490 MB once)`;
-  const sentences = splitSentences(text).map((s) => ({ text: s, tokens: tokenize(s, keep) }));
+  if (!text) throw new OmError('a recording without --text needs ASR — open Murmur with its API on, or --asr whisper');
+  if (asr === 'auto') note = `no ASR (Murmur not reachable, ${whisperCli() ? `whisper ${model} model not downloaded` : 'whisper not installed'}) — used silence alignment. For tighter timing open Murmur, or --asr whisper`;
+  const sentences = sentencesOf(text);
   const intervals = speechOf(wav, duration, '-35dB', 0.18);
   const spans = sentenceSpans(sentences.map((s) => sum(s.tokens.filter((t) => t.word).map(weight))), intervals);
   const out = sentences.map((s, i) => ({ text: s.text, tokens: placeSentence(s.tokens, spans[i].length ? spans[i] : [[spans[i - 1]?.at(-1)?.[1] ?? 0, spans[i - 1]?.at(-1)?.[1] ?? 0]]) }));

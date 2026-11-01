@@ -249,7 +249,7 @@ Requirements:
 - Google Chrome, Chromium or Edge. Stills, checks and export run in the browser you already have; no renderer is downloaded.
 - FFmpeg, for export and the soundtrack.
 - Optional: `om samples build` downloads a ~55 MB pack of CC0 / CC-BY instrument samples once; without it the music uses synths.
-- Optional narration: macOS system voices need nothing; Kokoro voices print a one-line setup the first time (uv and Python 3.12, a ~325 MB model); word timing needs `whisper-cli` (`brew install whisper-cpp`).
+- Optional narration: macOS system voices need nothing; Kokoro voices print a one-line setup the first time (uv and Python 3.12, a ~325 MB model); with the BreezeCast app running, `--voice breeze:<name>` uses its designed or cloned voices, directed line by line with `{tone}`, vocal events like `(laugh)` spoken but kept out of captions. Word timing for recordings uses the local Murmur app when its API is on, else `whisper-cli` (`brew install whisper-cpp`).
 
 `om doctor` tells you what is missing. Tested on macOS only so far. Codex's sandbox blocks the local preview and the browser; approve them when asked.
 
@@ -274,7 +274,7 @@ After the export, `om share` makes a share kit: a GIF under 10 MB (the opening p
 
 - **A film is one `index.html`.** GSAP, Canvas, Three.js, SVG, anything a browser draws. No video model; every frame is a function of the code and the time.
 - **Director rules, not templates.** Measured from 21 real launch films (cuts, beats, loudness, energy curves) and 142 high-engagement launch and motion films, organised into 20 motion languages. Every film starts with a rhythm sheet: a hook within 3 s, a burst in the middle, a beat of silence before the biggest hit.
-- **Sound is half of it.** Composer mode (the agent writes the score, sampled instruments play it), 12 product types × 3 fallback music directions, 23 sound effects placed on the line where the motion lands, narration from a system voice or your own recording.
+- **Sound is half of it.** Composer mode (the agent writes the score, sampled instruments play it), 12 product types × 3 fallback music directions, 23 sound effects placed on the line where the motion lands, narration from a system voice, a BreezeCast voice directed line by line, or your own recording.
 - **Its own render engine.** Several Chrome instances at once (by CPU count, up to 8 by default), picture and audio encoded in parallel, unchanged music reused. A 30-second film renders in about 12–15 s on my 14-core Mac; with motion blur, about 1–1.5 min.
 - **Checked before delivery.** `om check` (scripts, files, motion rules, cut-off or covered text), `om qa` (single-frame pops, dead time, motion curve), and the skill asks the agent to watch the frames and, when it can, have another agent review cold.
 

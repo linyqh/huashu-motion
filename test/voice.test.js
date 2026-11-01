@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   splitSentences, tokenize, weight, placeWords, placeSentence, wordsOf, parseSilences, speechIntervals,
-  sentenceSpans, alignChars, charTimes, asrChars, captionLines, toSrt, cueTerms, missingCues, applyVoice, pickVoice,
+  sentenceSpans, alignChars, charTimes, asrChars, murmurChars, captionLines, toSrt, cueTerms, missingCues, applyVoice, pickVoice, scriptSentences,
 } from '../cli/lib/voice.js';
 
 const SCRIPT = 'huashu-motion，一句话出片。你只要说出想法，Agent就把画面做出来。\n哪里不满意，指着画面改，它当场重做！改完一键导出，配音和字幕都对齐。';
@@ -22,6 +22,17 @@ test('splitSentences cuts at 。！？；, newlines and English full stops, keep
     'huashu-motion，一句话出片。', '你只要说出想法，Agent就把画面做出来。', '哪里不满意，指着画面改，它当场重做！', '改完一键导出，配音和字幕都对齐。',
   ]);
   assert.deepEqual(splitSentences('It costs 3.5 dollars. Fine?\n“好。”然后\n\n。'), ['It costs 3.5 dollars.', 'Fine?', '“好。”', '然后']);
+});
+
+test('scriptSentences: a {direction} line directs its sentences; vocal events are spoken but never shown', () => {
+  assert.deepEqual(scriptSentences('{语气轻快。语速稍快} [笑] 大家好。今天[叹气]聊聊它。\n普通一句！[笑]\n[清嗓子]\n再来一句。\n(laugh) That is (sigh) fine. (cough)'), [
+    { text: '大家好。', spoken: '[笑] 大家好。', direction: '语气轻快。语速稍快' },
+    { text: '今天聊聊它。', spoken: '今天[叹气]聊聊它。', direction: '语气轻快。语速稍快' },
+    { text: '普通一句！', spoken: '普通一句！ [笑]', direction: '' },
+    { text: '再来一句。', spoken: '[清嗓子] 再来一句。', direction: '' },
+    { text: 'That is fine.', spoken: '(laugh) That is (sigh) fine. (cough)', direction: '' },
+  ]);
+  assert.deepEqual(scriptSentences(SCRIPT).map((s) => s.text), splitSentences(SCRIPT));
 });
 
 test('tokenize keeps Latin runs and cue terms whole, words are Intl.Segmenter words', () => {
@@ -96,6 +107,17 @@ test('asrChars reads whisper.cpp full JSON and skips special tokens', () => {
   const cs = asrChars(json);
   assert.deepEqual(cs.map((c) => c.ch).join(''), '指着画面');
   assert.equal(cs[2].start, 0.4);
+});
+
+test('murmurChars spreads each word over its characters; a segment without words over the segment', () => {
+  const cs = murmurChars({ segments: [
+    { start: 0, end: 1, text: '花motion', words: [{ text: '花', start: 0, end: 0.2 }, { text: 'motion', start: 0.4, end: 1 }] },
+    { start: 2, end: 3, text: '出片。' },
+  ] });
+  assert.equal(cs.map((c) => c.ch).join(''), '花motion出片');
+  assert.equal(cs[1].start, 0.4);
+  assert.equal(cs[2].start, 0.5);
+  assert.deepEqual([cs[7].start, cs[7].end], [2, 2.5]);
 });
 
 test('captions: ≤16 visible characters, cut at commas, never across sentences', () => {
@@ -179,6 +201,8 @@ test('default voice: Chinese on macOS uses say:Tingting, elsewhere Kokoro', () =
   assert.deepEqual(pickVoice(undefined, 'hello', 'darwin'), { engine: 'kokoro', id: 'af_heart' });
   assert.deepEqual(pickVoice('say:Meijia', '你好'), { engine: 'say', id: 'Meijia' });
   assert.deepEqual(pickVoice('zf_xiaobei', '你好'), { engine: 'kokoro', id: 'zf_xiaobei' });
+  assert.deepEqual(pickVoice('breeze:老周', '你好'), { engine: 'breeze', id: '老周' });
+  assert.deepEqual(pickVoice('breeze', '你好'), { engine: 'breeze', id: '' });
 });
 
 test('wordsOf flattens timed words across sentences, in order', () => {
