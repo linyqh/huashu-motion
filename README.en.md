@@ -268,7 +268,7 @@ Requirements:
 
 Before a film it reads your past preferences and what earlier films taught; after it, it keeps what is worth keeping. Your preferences stay on your machine.
 
-After the export, `om share` makes a share kit: a GIF under 10 MB (the opening plus the end frame — ready for a README header or a post) and a share.md with the post and the README snippet. Films of 4 s or more end with a small "Made with huashu-motion" for their last 1.2 s, in a free corner, in the film's own typeface and colour; ask your agent to switch it off if you'd rather not.
+After the export, `om share` makes a share kit: a GIF under 10 MB (the opening plus the end frame — ready for a README header or a post) and a share.md with the post and the README snippet. Films carry no credit by default; ask your agent if you want a small "Made with huashu-motion" for the last 1.2 s, in a free corner, in the film's own typeface and colour.
 
 ## How it works
 

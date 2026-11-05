@@ -40,10 +40,10 @@ The studio draws them as the scene strip, and comments carry the scene they were
 
 ## The signature
 
-Every film of 4 s or more ends with a small "Made with huashu-motion" for its last 1.2 s: the engine draws it in the film's own typeface and text colour, in the first corner of the end frame that holds no text or picture, everywhere the film plays (studio, stills, render, share page). Overlay renders (`--transparent`) and shorter films never get it.
+Off by default: a film carries no credit unless it asks for one. With `data-om-signature="on"` on `<html>` or the root, a film of 4 s or more ends with a small "Made with huashu-motion" for its last 1.2 s: the engine draws it in the film's own typeface and text colour, in the first corner of the end frame that holds no text or picture, everywhere the film plays (studio, stills, render, share page). Overlay renders (`--transparent`) and shorter films never get it.
 
-- `data-om-signature="off"` on `<html>` or the root removes it; `"top-left"` (or another corner) pins it.
-- Leave one corner of the end frame clear. `om check` warns (`signature-covers`) when no corner is free.
+- `"top-left"` (or another corner) instead of `"on"` pins it; the root's value wins over `<html>`'s, so `"off"` on the root removes one set on `<html>`.
+- With it on, leave one corner of the end frame clear. `om check` warns (`signature-covers`) when no corner is free.
 
 ## Timing
 

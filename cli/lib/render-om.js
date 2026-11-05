@@ -88,7 +88,7 @@ export async function renderOm(project, { fps, out, format = 'mp4', transparent 
   }
   const film = films[0];
   const sig = await film.evaluate('window.__omEngine.signature()').catch(() => null);
-  if (sig) onNote(sig.on ? `signature on: "Made with huashu-motion" in a free corner for the last 1.2s (data-om-signature="off" on the root removes it)` : `signature off (${sig.why})`);
+  if (sig) onNote(sig.on ? `signature on: "Made with huashu-motion" in a free corner for the last 1.2s (remove data-om-signature from the root to drop it)` : `signature off (${sig.why})`);
   const tmp = mkdtempSync(join(tmpdir(), 'om-render-'));
   const forgetTmp = cleanupOnInterrupt(() => rmSync(tmp, { recursive: true, force: true }));
   const picture = join(tmp, format === 'gif' ? 'picture.mp4' : `picture.${format}`);

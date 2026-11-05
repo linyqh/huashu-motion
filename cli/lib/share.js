@@ -1,15 +1,14 @@
 // om share — after the render, the things a person needs to post the film: a GIF small enough for a README, X or a
-// chat (≤ 10 MB: the opening plus the end frame with its signature), and share.md with where each file goes, a slot for
-// the post the agent writes in the user's language, the line that says where the film came from, and a README snippet.
+// chat (≤ 10 MB: the opening plus the end frame), and share.md with where each file goes, a slot for the post the
+// agent writes in the user's language, and a README snippet.
 // Nothing is uploaded or posted: the user decides where it goes.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, relative } from 'node:path';
 import { OmError } from './project.js';
-import { REPO_URL } from './export.js';
 
 const LIMIT = 10 * 1024 * 1024; // GitHub's limit for an image in a README; X and most chats take more
-const END = 1.6; // the end frame and its signature (the engine shows it for the last 1.2 s)
+const END = 1.6; // the end frame
 const run = (args) => spawnSync('ffmpeg', ['-v', 'error', '-y', ...args], { encoding: 'utf8', maxBuffer: 64 << 20 });
 
 function probe(file) {
@@ -82,15 +81,12 @@ export function share(project, { from = 0, to = null, video = null } = {}) {
 ## 发帖文案 · Post
 
 <!-- agent: write 2–3 sentences in the user's language: what the film is about and one concrete detail of how it was made
-(the one-line request, a note given in the studio, the music it composed). Keep the last line as it is. -->
-
-Made with huashu-motion · ${REPO_URL} #huashumotion
+(the one-line request, a note given in the studio, the music it composed). -->
 
 ## README 头图 · README header
 
 \`\`\`html
-<a href="${REPO_URL}"><img src="${rel(gif)}" alt="" width="100%"></a>
-<sub>Made with <a href="${REPO_URL}">huashu-motion</a></sub>
+<img src="${rel(gif)}" alt="" width="100%">
 \`\`\`
 `;
   const mdFile = join(dir, 'share.md');

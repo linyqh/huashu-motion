@@ -90,8 +90,15 @@ test('engine: elements added later are bound too (data-var-src, data-var-text)',
 const sigAt = async (film, t) => { await film.seek(t); return film.evaluate(`(() => { const s = document.getElementById('om-signature'), i = window.__omEngine.signature();
   return { on: i.on, why: i.why || null, corner: i.shown && i.shown.corner, clear: i.shown && i.shown.clear, display: s ? s.style.display : null, opacity: s ? Number(s.style.opacity) : 0, text: s ? s.textContent : '' }; })()`); };
 
-test('engine: a film of 4 s or more ends with "Made with huashu-motion" in a free corner, faded in over its last 1.2 s', { skip }, async () => {
-  const { index } = makeFilm({ video: false, sound: false, duration: 6 });
+const SIG_ON = 'document.getElementById("film").setAttribute("data-om-signature", "on");';
+
+test('engine: no signature unless the film asks for it', { skip }, async () => {
+  const film = await openFilm(makeFilm({ video: false, sound: false, duration: 6 }).index, {});
+  try { const s = await sigAt(film, 5.9); assert.equal(s.on, false); assert.equal(s.display, null); } finally { await film.close(); }
+});
+
+test('engine: with data-om-signature="on", a film of 4 s or more ends with "Made with huashu-motion" in a free corner, faded in over its last 1.2 s', { skip }, async () => {
+  const { index } = makeFilm({ video: false, sound: false, duration: 6, script: SIG_ON });
   const film = await openFilm(index, {});
   try {
     assert.equal((await sigAt(film, 3)).display, null, 'nothing before its window');
@@ -107,17 +114,19 @@ test('engine: a film of 4 s or more ends with "Made with huashu-motion" in a fre
 
 test('engine: the signature moves to a corner the film leaves free, and data-om-signature pins or removes it', { skip }, async () => {
   const body = '<div style="position:absolute;right:4px;bottom:4px;font-size:14px">www.example.com</div>';
-  let film = await openFilm(makeFilm({ video: false, sound: false, duration: 6, body }).index, {});
+  let film = await openFilm(makeFilm({ video: false, sound: false, duration: 6, body, script: SIG_ON }).index, {});
   try { const s = await sigAt(film, 5.9); assert.equal(s.corner, 'bottom-left'); assert.equal(s.clear, true); } finally { await film.close(); }
   film = await openFilm(makeFilm({ video: false, sound: false, duration: 6, script: 'document.getElementById("film").setAttribute("data-om-signature", "top-left");' }).index, {});
   try { assert.equal((await sigAt(film, 5.9)).corner, 'top-left'); } finally { await film.close(); }
-  film = await openFilm(makeFilm({ video: false, sound: false, duration: 6, script: 'document.documentElement.setAttribute("data-om-signature", "off");' }).index, {});
-  try { const s = await sigAt(film, 5.9); assert.equal(s.on, false); assert.equal(s.display, null); } finally { await film.close(); }
+  film = await openFilm(makeFilm({ video: false, sound: false, duration: 6, script: 'document.documentElement.setAttribute("data-om-signature", "on");' }).index, {});
+  try { assert.equal((await sigAt(film, 5.9)).on, true, 'on <html> works too'); } finally { await film.close(); }
+  film = await openFilm(makeFilm({ video: false, sound: false, duration: 6, script: 'document.documentElement.setAttribute("data-om-signature", "on"); document.getElementById("film").setAttribute("data-om-signature", "off");' }).index, {});
+  try { const s = await sigAt(film, 5.9); assert.equal(s.on, false, 'the root overrides <html>'); assert.equal(s.display, null); } finally { await film.close(); }
 });
 
 test('engine: no signature on an overlay render or a film shorter than 4 s', { skip }, async () => {
-  let film = await openFilm(makeFilm({ video: false, sound: false, duration: 6, clear: true }).index, { transparent: true });
+  let film = await openFilm(makeFilm({ video: false, sound: false, duration: 6, clear: true, script: SIG_ON }).index, { transparent: true });
   try { const s = await sigAt(film, 5.9); assert.equal(s.on, false); assert.equal(s.why, 'overlay render'); } finally { await film.close(); }
-  film = await openFilm(makeFilm({ video: false, sound: false, duration: 2 }).index, {});
+  film = await openFilm(makeFilm({ video: false, sound: false, duration: 2, script: SIG_ON }).index, {});
   try { const s = await sigAt(film, 1.95); assert.equal(s.on, false); assert.equal(s.display, null); } finally { await film.close(); }
 });
